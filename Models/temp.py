@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from PIL import Image
 import os
 import glob
 import matplotlib.pyplot as plt
@@ -40,11 +39,14 @@ class ImageDataset(Dataset):
         # 加载.npy文件[深度, 高, 宽]
         depth_images = np.load(npy_path)  # 输出形状：(3, H, W)
 
-        # 归一化
-        if depth_images.dtype == np.uint8:
-            depth_images = depth_images.astype(np.float32) / 255.0
+        # 只保留第三张图片（索引2）
+        third_image = depth_images[2:3]  # 形状变为 (1, H, W)
 
-        image_tensor = torch.from_numpy(depth_images).unsqueeze(0)  # 形状：(1, 3, H, W)
+        # 归一化
+        if third_image.dtype == np.uint8:
+            third_image = third_image.astype(np.float32) / 255.0
+
+        image_tensor = torch.from_numpy(third_image)  # 形状：(1, H, W)
 
         if self.transform:
             image_tensor = self.transform(image_tensor)
@@ -52,133 +54,99 @@ class ImageDataset(Dataset):
         return image_tensor, label
 
 
-class CNN3DModel(nn.Module):
-    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.2):
-        super(CNN3DModel, self).__init__()
-
-        self.cnn3d = nn.Sequential(
-
-            nn.Conv3d(input_channels, 32, kernel_size=(3, 3, 3), padding=1, bias=False),
-            nn.GroupNorm(num_groups=4, num_channels=32),
-            nn.SiLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2)),
-            nn.Dropout3d(dropout_rate / 2),
-
-            DepthwiseSeparableConv3d(32, 64, kernel_size=(3, 3, 3), padding=1),
-            nn.BatchNorm3d(64),
-            nn.SiLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2)),
-            nn.Dropout3d(dropout_rate / 2),
-
-            ResidualBlock(64, 128, kernel_size=(3, 3, 3), padding=1),
-            nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2)),
-            nn.Dropout3d(dropout_rate),
-
-            nn.Conv3d(128, 256, kernel_size=(3, 3, 3), padding=(1, 2, 2), dilation=(1, 2, 2), bias=False),
-            nn.BatchNorm3d(256),
-            nn.SiLU(inplace=True),
-            nn.AdaptiveAvgPool3d((4, 4, 4)),
-            nn.Dropout3d(dropout_rate),
-        )
-
-        # 时间注意力
-        self.time_attention = nn.Sequential(
-            nn.Conv1d(256, 128, kernel_size=1),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-            nn.Conv1d(128, 64, kernel_size=1),
-            nn.BatchNorm1d(64),
-            nn.SiLU(),
-            nn.Conv1d(64, 1, kernel_size=1),
-            nn.Flatten(),
-            nn.Softmax(dim=1)
-        )
-
-        self.scale = nn.Parameter(torch.tensor(1.0))
-        self.bias = nn.Parameter(torch.tensor(0.0))
-
-        self.classifier = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.SiLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(128, num_classes)
-        )
-
-        self._initialize_weights()
-
-    def forward(self, x):
-        features = self.cnn3d(x)
-
-        batch_size, channels, time_steps, height, width = features.size()
-        spatial_features = features.view(batch_size, channels, time_steps, -1)
-        spatial_pool = torch.mean(spatial_features, dim=-1)  # [B, C, T]
-
-        # 计算时间注意力权重
-        att_weights = self.time_attention(spatial_pool)
-        att_weights = att_weights.view(batch_size, 1, time_steps)
-
-        # 应用注意力
-        fused_features = torch.bmm(spatial_pool, att_weights.transpose(1, 2)).squeeze(-1)
-
-        # 应用缩放和偏置
-        fused_features = self.scale * fused_features + self.bias
-
-        # 分类
-        output = self.classifier(fused_features)
-
-        return output
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm3d) or isinstance(m, nn.GroupNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
-
-
-# 深度可分离卷积
-class DepthwiseSeparableConv3d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, padding=0):
-        super(DepthwiseSeparableConv3d, self).__init__()
-        self.depthwise = nn.Conv3d(in_channels, in_channels, kernel_size,
-                                   padding=padding, groups=in_channels, bias=False)
-        self.pointwise = nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False)
+# 深度可分离卷积（Depthwise + Pointwise）
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_channels, in_channels, kernel_size=3, stride=stride,
+            padding=1, groups=in_channels, bias=False
+        )  # 深度卷积（每个通道单独卷积）
+        self.pointwise = nn.Conv2d(
+            in_channels, out_channels, kernel_size=1, stride=1, bias=False
+        )  # 逐点卷积（跨通道融合）
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.ReLU6()  # 使用ReLU6保持轻量化
 
     def forward(self, x):
         x = self.depthwise(x)
         x = self.pointwise(x)
+        x = self.bn(x)
+        return self.act(x)
+
+
+# 逆残差块（先升维再降维）
+class InvertedResidual(nn.Module):
+    def __init__(self, in_channels, out_channels, stride, expansion=2):
+        super().__init__()
+        self.stride = stride
+        hidden_dim = int(in_channels * expansion)  # 扩展维度
+
+        # 1x1 升维卷积
+        self.expand = nn.Conv2d(in_channels, hidden_dim, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(hidden_dim)
+
+        # 深度可分离卷积（保持维度）
+        self.dw_conv = DepthwiseSeparableConv(hidden_dim, hidden_dim, stride=stride)
+
+        # 1x1 降维卷积（线性激活，无ReLU）
+        self.reduce = nn.Conv2d(hidden_dim, out_channels, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # 跳跃连接（仅当输入输出形状相同时启用）
+        self.use_res_connect = (stride == 1 and in_channels == out_channels)
+
+    def forward(self, x):
+        identity = x
+        x = self.expand(x)
+        x = self.bn1(x)
+        x = F.relu6(x)
+        x = self.dw_conv(x)
+        x = self.reduce(x)
+        x = self.bn2(x)
+        if self.use_res_connect:
+            return x + identity
         return x
 
 
-# 残差块
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, padding=0):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size, padding=padding, bias=False)
-        self.bn1 = nn.BatchNorm3d(out_channels)
-        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size, padding=padding, bias=False)
-        self.bn2 = nn.BatchNorm3d(out_channels)
+# 定义完整模型
+class LightweightModel(nn.Module):
+    def __init__(self, num_classes=5):
+        super().__init__()
+        # 输入为单通道（第三张图片）
+        self.first_conv = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU6()
+        )
 
-        self.shortcut = nn.Sequential()
-        if in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False),
-                nn.BatchNorm3d(out_channels)
-            )
+        # 逆残差块堆叠
+        self.blocks = nn.Sequential(
+            InvertedResidual(16, 32, stride=2, expansion=4),  # 输出尺寸减半
+            InvertedResidual(32, 32, stride=1, expansion=4),  # 保持尺寸
+            InvertedResidual(32, 64, stride=2, expansion=4),  # 输出尺寸减半
+            InvertedResidual(64, 64, stride=1, expansion=4),
+            InvertedResidual(64, 128, stride=2, expansion=4),  # 输出尺寸减半
+
+            nn.Conv2d(128,512,1)
+            nn.ReLU6()
+        )
+
+        # 全局平均池化 + 分类头
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),  # 全局平均池化到1x1
+            nn.Flatten(),
+            nn.Linear(512, 128),
+            nn.ReLU6(),
+            nn.Dropout1d(0.2)
+            nn.Linear(128, num_classes)  # 输出类别数
+        )
 
     def forward(self, x):
-        out = F.silu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.silu(out)
-        return out
+        x = self.first_conv(x)
+        x = self.blocks(x)
+        x = self.classifier(x)
+        return x
 
 
 # 训练
@@ -195,7 +163,6 @@ def train():
 
     # 数据预处理
     transform = transforms.Compose([
-
         transforms.Normalize(  # 归一化
             mean=[0.5],
             std=[0.5]
@@ -239,7 +206,7 @@ def train():
         ]
 
     # 初始化模型
-    model = CNN3DModel(num_classes=5).to(device)
+    model = LightweightModel(num_classes=5).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(
         get_optim_params(model),
@@ -276,7 +243,7 @@ def train():
 
             # 验证输入形状
             if batch_idx == 0 and epoch == 0:
-                print(f"输入形状: {images.shape}（[batch, time_steps, H, W]）")  # 应输出[32, 3, 128, 128]
+                print(f"输入形状: {images.shape}（[batch, channel, H, W]）")  # 应输出 [batch_size, 1, H, W]
 
             outputs = model(images)
             loss = criterion(outputs, labels)
@@ -341,7 +308,7 @@ def train():
             print(f'\nEarly stopping triggered at epoch {epoch + 1}!')
             model.load_state_dict(best_model_weights)
             torch.save(best_model_weights,
-                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\3dModel.pth")
+                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\temp0model.pth")
             break
 
         print(f'Best validation accuracy: {best_val_acc:.2f}')

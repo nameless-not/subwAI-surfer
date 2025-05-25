@@ -10,7 +10,7 @@ from tqdm import tqdm  # 用于显示进度条
 class InplaceNpyProcessor:
     """在同一文件夹内处理 .npy 文件"""
 
-    def __init__(self, input_folders: list, target_size: tuple = (128, 128),
+    def __init__(self, input_folders: list, target_size: tuple = (320, 240),
                  suffix: str = "_resized", processed_log: str = 'processed_files.json'):
         """
         初始化处理器3
@@ -67,6 +67,18 @@ class InplaceNpyProcessor:
         root, ext = os.path.splitext(basename)
         return os.path.join(dirname, f"{root}{self.suffix}{ext}")
 
+    def _unsharp_mask(self, image, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0):
+        """非锐化掩蔽增强版"""
+        blurred = cv2.GaussianBlur(image, kernel_size, sigma)
+        sharpened = float(amount + 1) * image - float(amount) * blurred
+        sharpened = np.maximum(sharpened, np.zeros(sharpened.shape))
+        sharpened = np.minimum(sharpened, 255 * np.ones(sharpened.shape))
+        sharpened = sharpened.round().astype(np.uint8)
+        if threshold > 0:
+            low_contrast_mask = np.absolute(image - blurred) < threshold
+            np.copyto(sharpened, image, where=low_contrast_mask)
+        return sharpened
+
     def _process_npy_file(self, input_path: str) -> bool:
         """处理单个 .npy 文件"""
         try:
@@ -95,9 +107,11 @@ class InplaceNpyProcessor:
                                     dtype=data.dtype)
 
             for i in range(data.shape[0]):
-                # 使用双三次插值调整单张图像
+                # 使用Lanczos-2插值调整单张图像
                 resized_data[i] = cv2.resize(data[i], self.target_size,
-                                             interpolation=cv2.INTER_CUBIC)
+                                             interpolation=cv2.INTER_LANCZOS4)
+                # 应用非锐化掩蔽增强版进行锐化
+                resized_data[i] = self._unsharp_mask(resized_data[i])
 
             # 保存结果（如果后缀为空则覆盖原文件）
             np.save(output_path, resized_data)
@@ -164,9 +178,9 @@ def main():
     parser = argparse.ArgumentParser(description='在同一文件夹内处理 .npy 文件')
     parser.add_argument('-i', '--input', nargs='+', required=False,  # 修改为可选参数
                         help='输入文件夹路径列表，用空格分隔')
-    parser.add_argument('-s', '--size', type=int, nargs=2, default=(224, 224),
+    parser.add_argument('-s', '--size', type=int, nargs=2, default=(320, 240),
                         metavar=('WIDTH', 'HEIGHT'),
-                        help='目标图像尺寸 (宽, 高)，默认为 224x224')
+                        help='目标图像尺寸 (宽, 高)，默认为 320x240')
     parser.add_argument('--suffix', default='_resized',
                         help='处理后文件的后缀，设为空字符串可覆盖原文件')
     parser.add_argument('-l', '--log', default='processed_files.json',
@@ -189,13 +203,13 @@ def main():
         # 使用代码中硬编码的参数
         processor = InplaceNpyProcessor(
             input_folders=[
-                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\0",
-                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\1",
-                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\2",
-                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\3",
-                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\4"
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata\0",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata\1",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata\2",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata\3",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata\4"
             ],
-            target_size=(128, 128),  # 设置为你需要的尺寸
+            target_size=(320, 240),  # 设置为你需要的尺寸[W,H]
             suffix="",  # 设为空字符串表示覆盖原文件
             processed_log='processed_files.json'
         )

@@ -5,12 +5,9 @@ import time
 import keyboard
 import os
 from datetime import datetime
-import time
-
-time.sleep(10)
 
 
-class ScreenCapture:
+class EnhancedScreenCapture:
     def __init__(self, region=None, output_path="screenshots/"):
         """初始化屏幕截图工具"""
         self.region = region or self.get_fullscreen_region()
@@ -18,8 +15,8 @@ class ScreenCapture:
         self.frame = None
         self.last_time = time.time()
         self.auto_interval = 0.05  # 自动截图间隔（0.05秒）
-        self.auto_screenshots = []  # 自动截图缓存（最多保存4张）
-        self.max_cache_size = 4
+        self.auto_screenshots = []  # 自动截图缓存（最多保存6张）
+        self.max_cache_size = 6  # 增加缓存大小以支持更多历史帧
 
         # 定义保存目录
         self.directories = {
@@ -41,6 +38,13 @@ class ScreenCapture:
         # 自动截图计时
         self.last_auto_save = time.time()
         self.last_key_press_time = time.time()
+
+        # 增强功能计时器和状态
+        self.enhanced_mode_active = False  # 增强模式激活状态
+        self.enhanced_mode_start_time = 0  # 增强模式开始时间
+        self.last_enhanced_check_time = 0  # 上次增强检查时间
+        self.enhanced_direction = None  # 增强模式方向
+        self.enhanced_check_intervals = [0.3, 0.6, 0.9]  # 检查时间点
 
         # 方向镜像映射
         self.mirror_mapping = {
@@ -77,14 +81,14 @@ class ScreenCapture:
 
     def create_composite_image(self, direction):
         """创建合成图（仅保存原始张量NPY）"""
-        if len(self.auto_screenshots) < 4:
-            print("缓存不足，至少需要4张自动截图")
+        if len(self.auto_screenshots) < 3:
+            print("缓存不足，至少需要3张自动截图")
             return None, None, None, None, None, None
 
-        # 提取缓存中的截图
-        img1 = self.auto_screenshots[-4]['frame']
+        # 提取缓存中的截图 - 取当前帧和前两帧
+        img1 = self.auto_screenshots[-3]['frame']
         img2 = self.auto_screenshots[-2]['frame']
-        img3 = self.frame
+        img3 = self.auto_screenshots[-1]['frame']
 
         h, w = img3.shape[:2]
         img1 = cv2.resize(img1, (w, h))
@@ -117,12 +121,38 @@ class ScreenCapture:
 
         return composite_tensor, None, tensor_filename, mirrored_tensor, None, mirror_tensor_filename
 
+    def handle_enhanced_capture(self):
+        """处理增强模式下的截图逻辑"""
+        current_time = time.time()
+        elapsed_time = current_time - self.enhanced_mode_start_time
+
+        # 检查是否超过1秒
+        if elapsed_time > 1.0:
+            self.enhanced_mode_active = False
+            return
+
+        # 检查是否需要在特定时间点执行截图
+        for interval in self.enhanced_check_intervals:
+            if (interval - 0.005) <= elapsed_time < (interval + 0.005):
+                # 检查是否有按键操作
+                any_key_pressed = any(keyboard.is_pressed(key) for key in self.key_mapping)
+                if not any_key_pressed:
+                    # 没有按键操作，执行截图
+                    print(f"增强模式: 在按键后{interval:.1f}秒检测到无按键，保存截图")
+                    self.create_composite_image('auto')
+                else:
+                    # 有按键操作，重置增强模式
+                    self.enhanced_mode_start_time = current_time
+                    print("增强模式: 检测到新按键，重置计时器")
+                break
+
     def run(self):
         """启动程序主循环（无窗口显示）"""
         print("程序启动 - 功能说明:")
-        print("  自动模式: 每0.05秒缓存截图（内存中，最多4张）")
+        print("  自动模式: 每0.05秒缓存截图（内存中，最多6张）")
         print("  按键模式: W/S/A/D 生成合成图和镜像图")
         print("  无操作模式: 1秒无按键自动生成合成图和镜像图")
+        print("  增强模式: 按键操作后1秒内，每0.3秒检测无按键则保存截图")
         print("按 ESC 退出程序")
 
         while not keyboard.is_pressed('esc'):
@@ -143,19 +173,29 @@ class ScreenCapture:
                     # 生成合成图和镜像图
                     self.create_composite_image(direction)
 
+                    # 激活增强模式
+                    self.enhanced_mode_active = True
+                    self.enhanced_mode_start_time = time.time()
+                    self.enhanced_direction = direction
+                    print(f"激活增强模式: {direction}")
+
             # 重置按键状态
             for key in self.key_mapping:
                 if not keyboard.is_pressed(key):
                     self.key_states[key] = False
 
+            # 处理增强模式
+            if self.enhanced_mode_active:
+                self.handle_enhanced_capture()
+
             # 检测无按键操作时间
             idle_time = time.time() - self.last_key_press_time
-            if idle_time >= 1.0 and len(self.auto_screenshots) >= 4:
+            if idle_time >= 1 and len(self.auto_screenshots) >= 4:
                 self.last_key_press_time = time.time()
                 print("检测到1秒无按键操作，自动生成合成图")
                 self.create_composite_image('auto')
 
-            time.sleep(0.01)  # 降低CPU占用
+            time.sleep(0.001)  # 降低CPU占用
 
         print("程序退出")
 
@@ -176,15 +216,15 @@ if __name__ == "__main__":
     # 自定义截图区域（示例：全屏）
     custom_region = {
         "top": 0,
-        "left": 128,
-        "width": 896,  # 屏幕宽度
-        "height": 768  # 屏幕高度
+        "left": 0,
+        "width": 800,  # 屏幕宽度
+        "height": 600  # 屏幕高度
     }
 
     # 创建实例
-    sc = ScreenCapture(
+    sc = EnhancedScreenCapture(
         region=custom_region,
-        output_path=r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
+        output_path=r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\savenpy"
     )
 
     # 启动程序（无窗口显示）
