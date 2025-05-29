@@ -138,26 +138,7 @@ class GameEnvironment:
             while self.screenshot_queue.qsize() < 3:
                 time.sleep(0.001)
 
-            # 取出所有帧（最多3帧）
-            frames = []
-            while not self.screenshot_queue.empty():
-                frames.append(self.screenshot_queue.get())
-
-            # 确保保留最新3帧（处理队列延迟）
-            if len(frames) > 3:
-                frames = frames[-3:]
-            elif len(frames) < 3:
-                frames = frames + [frames[-1]] * (3 - len(frames))  # 用最近帧填充
-
-            # 重新放入未使用的帧（保证队列始终有最新数据）
-            for frame in frames:
-                try:
-                    self.screenshot_queue.put(frame, block=False)
-                except Full:
-                    self.screenshot_queue.get()
-                    self.screenshot_queue.put(frame)
-
-            return np.stack(frames, axis=0)  # 形状(3, 224, 224)
+            return np.stack(list(self.screenshot_queue.queue)[-3:], axis=0)  # 形状(3, 224, 224)
 
     def reset(self):
         """重置环境时清空截图队列"""
@@ -197,7 +178,7 @@ class GameEnvironment:
     def _calculate_reward(self):
         base_reward = 0
         if self.current_second > 0:
-            base_reward += 1
+            base_reward += 0.01
         event_reward = sum(self.reward_events.get(self.current_second, []))
         if self.end_triggered:
             elapsed_in_second = time.time() - self.start_time - self.current_second
@@ -213,9 +194,13 @@ class GameEnvironment:
         return False
 
     def _press_key(self, key):
-        keyboard.press(key)
-        time.sleep(0.03)
-        keyboard.release(key)
+        # 异步执行
+        def press_and_release():
+            keyboard.press(key)
+            time.sleep(0.03)
+            keyboard.release(key)
+
+        Thread(target=press_and_release, daemon=True).start()
 
 
 # -------------------------- 强化学习智能体 --------------------------
