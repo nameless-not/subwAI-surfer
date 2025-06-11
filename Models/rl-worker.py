@@ -180,7 +180,7 @@ class GameEnvironment:
     def load_save_template(self):
         """加载Save按钮模板图像"""
         try:
-            template_path = r"C:\Users\4h55\Pictures\Camera Roll\c40499055919211021dbe7bd171fc5c.png"
+            template_path = "save.png"
             self.save_template = cv2.imread(template_path, 0)  # 灰度模式读取
             if self.save_template is None:
                 raise FileNotFoundError(f"模板文件未找到：{template_path}")
@@ -192,7 +192,7 @@ class GameEnvironment:
         """加载Play按钮模板图像"""
         try:
             # 模板图片路径需根据实际情况调整，假设与脚本同目录
-            template_path = r"C:\Users\4h55\Pictures\Camera Roll\e73d94e580d4c7cc4d98cab51aa5c45.png"
+            template_path = "play.png"
             self.play_template = cv2.imread(template_path, 0)  # 灰度模式读取
             if self.play_template is None:
                 raise FileNotFoundError(f"Play模板文件未找到：{template_path}")

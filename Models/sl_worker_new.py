@@ -19,7 +19,7 @@ from sklearn.metrics import classification_report, f1_score
 # 数据加载
 class ImageDataset(Dataset):
     def __init__(self, root_dir, transform=None):
-        self.root_dir = r"/subwAI-surfer/traindata"
+        self.root_dir = root_dir
         self.transform = transform
         self.npy_paths = []  # 存储.npy文件路径
         self.labels = []  # 存储对应标签
@@ -27,7 +27,7 @@ class ImageDataset(Dataset):
         for label in sorted(os.listdir(root_dir)):
             label_path = os.path.join(root_dir, label)
             if os.path.isdir(label_path) and label.isdigit():
-                # 获取当前标签下所有.npy文件
+                # 获取当前标签下.npy文件
                 npy_files = glob.glob(os.path.join(label_path, "*.npy"))
                 self.npy_paths.extend(npy_files)
                 self.labels.extend([int(label)] * len(npy_files))
@@ -93,18 +93,14 @@ class RandomBrightnessContrast:
 # 数据增强变换
 class TemporalTransform:
     def __init__(self, transform):
-        self.transform = transform  # 单帧变换（支持多通道）
+        self.transform = transform  # 单帧变换
 
     def __call__(self, x):
-        """
-        输入形状: (T, C, H, W) （T=3时间步，C=1通道）
-        输出形状: (T, C, H, W) （保持时间步结构）
-        """
         # 合并时间维度和通道维度（T*C, H, W）
         t, c, h, w = x.shape
         merged = x.reshape(t * c, h, w)  # 形状变为 (3, H, W)（假设C=1）
 
-        # 应用变换（变换会对所有合并的"通道"使用相同参数）
+        # 应用变换
         transformed_merged = self.transform(merged)
 
         # 恢复时间维度和通道维度
@@ -219,14 +215,12 @@ class BaseEncoder(nn.Module):
 class TemporalSpatialModel(nn.Module):
     def __init__(self, num_classes=5):
         super().__init__()
+
         # 共享基础卷积层
         self.base_encoder = BaseEncoder()
 
-        # 空间主分支增强
+        # 空间增强分支
         self.spatial_enhancer = nn.Sequential(
-
-            #ResidualBlock(128, 256, stride=1, kernel_size=5, use_se=True),
-            #ResidualBlock(256, 128, stride=2, kernel_size=5, use_se=True), # 14→7
 
             nn.Conv2d(96,192, kernel_size=5, stride=2, padding=2),
             nn.BatchNorm2d(192),
@@ -263,10 +257,6 @@ class TemporalSpatialModel(nn.Module):
 
 
         # 特征融合
-        # self.fusion_block = GatedChannelAttentionFusion(
-        #     in_channels=256 + 128,
-        #     reduction=32
-        # )
         self.fusion_block = nn.Sequential(
             nn.Linear(192+96, 512),
             nn.LayerNorm(512),
@@ -304,17 +294,8 @@ class TemporalSpatialModel(nn.Module):
 
         # 拼接时间维度
         temporal_seq = torch.stack([t2_feat, t1_feat, t_feat], dim=2)
-        #temporal_seq = temporal_seq.squeeze(-1)
 
         temporal_feat = self.temporal_conv(temporal_seq)
-
-        # 展平时间特征
-        #temporal_feat = temporal_feat.flatten(1)
-
-        # # 对权重进行归一化
-        # weights = torch.softmax(self.temporal_weights, dim=0).unsqueeze(0).unsqueeze(0)
-        # # 加权求和
-        # temporal_feat_weighted = torch.sum(temporal_feat * weights, dim=2)
 
         # 特征融合
         fused_feat = torch.cat([
@@ -356,29 +337,6 @@ class TemporalSpatialModel(nn.Module):
 
         return fused_feat
 
-
-# # 门控通道注意力融合
-# class GatedChannelAttentionFusion(nn.Module):
-#     def __init__(self, in_channels, reduction=16):
-#         super().__init__()
-#         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-#         self.gate_fc = nn.Sequential(
-#             nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
-#             nn.SiLU(),
-#             nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
-#             nn.Sigmoid()
-#         )
-#
-#         self.residual = nn.Identity() if in_channels == in_channels else nn.Conv2d(in_channels, in_channels, 1)
-#
-#     def forward(self, x):
-#
-#         gate = self.gate_fc(self.avg_pool(x))
-#
-#         fused = x * gate + self.residual(x)
-#         return fused
-
-
 # 自定义支持变换的子集类
 class TransformedSubset(torch.utils.data.Subset):
     def __init__(self, dataset, indices, transform=None):
@@ -393,33 +351,26 @@ class TransformedSubset(torch.utils.data.Subset):
 
 # 训练
 def train():
-    data_root = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\traindata"
+    data_root = "traindata"
     batch_size = 32
     num_epochs = 100
     lr = 0.0005
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # plt.ion()
-    # fig = plt.figure()
-    # ax = fig.add_subplot(111)
-
-    # 数据增强（对三帧应用相同变换）
+    # 数据增强
     transform = transforms.Compose([
         # 下采样
         TemporalTransform(transforms.Resize((224, 224))),
-        # 随机水平翻转
-        #TemporalTransform(transforms.RandomHorizontalFlip(p=0.3)),
         # 随机旋转
         TemporalTransform(transforms.RandomRotation(degrees=10)),
         # 随机仿射变换
         TemporalTransform(transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1))),
-        # 随机高斯模糊
-        #TemporalTransform(transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3)),
         # 随机高斯噪声
         TemporalTransform(transforms.RandomApply([AddGaussianNoise(std_range=(0.005, 0.015))], p=0.3)),
         # 随机光照变化
         TemporalTransform(transforms.RandomApply([RandomBrightnessContrast()], p=0.3))
     ])
+
     val_transform = transforms.Compose([
         # 下采样
         TemporalTransform(transforms.Resize((224, 224)))
@@ -574,7 +525,7 @@ def train():
     # 保存最佳模型
     if best_model_weights:
         torch.save(best_model_weights,
-                   r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\1_2d_newmodel.pth")
+                   "weights/newmodel.pth")
         print(f'最佳模型已保存（验证宏F1：{best_macro_f1:.4f}）')
 
     print('训练完成！')
