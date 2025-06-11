@@ -23,7 +23,7 @@ import torch.nn.functional as F
 
 # PPO代理
 class PPOAgent:
-    def __init__(self, action_dim=5, device='cuda', gae_lambda=0.95, clip_epsilon=0.15, clip_grad_norm=0.1, entropy_coef=0.01):
+    def __init__(self, action_dim=5, device='cuda', gae_lambda=0.93, clip_epsilon=0.2, clip_grad_norm=0.5):
         self.policy = TemporalSpatialModel(num_classes=action_dim).to(device)
         self.value_net = nn.Sequential(
             nn.Linear(512, 128),
@@ -35,13 +35,12 @@ class PPOAgent:
         self.optimizer = torch.optim.AdamW([
             {"params": self.policy.parameters()},
             {"params": self.value_net.parameters()}
-        ], lr=0.00001, weight_decay=5e-5)
+        ], lr=0.0001, weight_decay=5e-5)
         self.clip_grad_norm = clip_grad_norm
         self.device = device
         self.gae_lambda = gae_lambda
         self.clip_epsilon = clip_epsilon
-        self.gamma = 0.99
-        self.entropy_coef = entropy_coef
+        self.gamma = 0.98
 
     def get_action(self, state):
         state = torch.FloatTensor(state).to(self.device)
@@ -101,12 +100,7 @@ class PPOAgent:
         ratio = torch.exp(log_probs - log_probs_old)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
-
-        # 熵正则化
-        dist = Categorical(logits=logits)
-        entropy = dist.entropy().mean()
-        
-        policy_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         target_values = rewards + self.gamma * next_values * (1 - dones)
         value_loss = F.mse_loss(values, target_values)
@@ -561,7 +555,6 @@ def main_rl_training():
     env = GameEnvironment(region=None)
     action_dim = 5
     agent = PPOAgent(action_dim=action_dim, device=device)
-    okcheck = False
 
     # 模型加载
     if os.path.exists(MODEL_PATH):
@@ -606,36 +599,14 @@ def main_rl_training():
                     optimizer_params.append(param)
                 agent.optimizer = torch.optim.AdamW(optimizer_params, lr=1e-5, weight_decay=5e-5)
                 print("加载强化学习历史模型")
-
-                # 加载训练统计信息
-                training_stats = checkpoint.get('training_stats', {
-                    'episode_rewards': [],
-                    'episode_lengths': [],
-                    'losses': [],
-                    'entropies': []
-                })
-
         except Exception as e:
             print(f"模型加载异常: {str(e)}，从头训练")
     else:
         print("未找到历史模型，从头训练")
 
     max_episodes = 1000000
-    max_steps_per_episode = 10000
+    max_steps_per_episode = 1000000
     action_interval = 0.4
-    batch_size = 128
-    update_frequency = 4  # 每4步更新一次
-    save_interval = 10  # 每10轮保存一次
-
-    # 经验回放缓冲区
-    replay_buffer = {
-        'states': [],
-        'actions': [],
-        'log_probs': [],
-        'rewards': [],
-        'dones': []
-    }
-
 
     # 初始状态获取
     state = env.reset()
@@ -647,139 +618,70 @@ def main_rl_training():
         states, actions, log_probs, rewards, dones = [], [], [], [], []
         last_action_time = time.time()
 
-        # 重置当前回合数据
-        episode_data = {
-            'states': [],
-            'actions': [],
-            'log_probs': [],
-            'rewards': [],
-            'dones': []
-        }
-
-        while not done and step_count < max_steps_per_episode:
+        for step in range(max_steps_per_episode):
             current_time = time.time()
             time_to_wait = max(action_interval - (current_time - last_action_time), 0)
             time.sleep(time_to_wait)
             last_action_time = time.time()
 
-            # 获取状态并选择动作
             latest_state = env._get_state()
             action, log_prob = agent.get_action(latest_state)
             next_state, reward, done, _ = env.step(action)
 
-            # 存储经验
-            episode_data['states'].append(latest_state)
-            episode_data['actions'].append(action)
-            episode_data['log_probs'].append(log_prob)
-            episode_data['rewards'].append(reward)
-            episode_data['dones'].append(done)
-
-            # 添加到回放缓冲区
-            for key in replay_buffer:
-                replay_buffer[key].append(episode_data[key][-1])
-
+            states.append(latest_state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            dones.append(done)
             state = next_state
             episode_reward += reward
-            step_count += 1
 
-            # 定期更新模型
-            if step_count % update_frequency == 0 and len(replay_buffer['states']) >= batch_size:
-                # 从缓冲区采样一个批次
-                indices = np.random.choice(len(replay_buffer['states']), batch_size, replace=False)
-                batch = {k: [replay_buffer[k][i] for i in indices] for k in replay_buffer}
+            if done:  # 检测到游戏结束
+                print(f"第 {episode} 轮结束，步数 {step + 1}，奖励: {episode_reward:.2f}")
+                # 奖励调整逻辑
+                total_steps = len(rewards)
+                start_idx = max(0, total_steps - 5)
+                punish_indices = list(range(start_idx, total_steps))
+                with env.n_key_lock:
+                    reward_indices = env.n_reward_indices.copy()
+                    env.n_reward_indices = []
+                for idx in reward_indices:
+                    if 0 <= idx < len(rewards):
+                        rewards[idx] += 0.2
+                for idx in punish_indices:
+                    if 0 <= idx < len(rewards):
+                        rewards[idx] -= 2.0 if actions[idx] is not None else 1.0
 
-                # 更新模型
-                total_loss, policy_loss, value_loss, entropy = agent.update(
-                    batch['states'],
-                    batch['actions'],
-                    batch['log_probs'],
-                    batch['rewards'],
-                    batch['dones']
-                )
+                # 模型更新
+                if len(states) > 0:
+                    states_np = np.stack(states, axis=0)
+                    loss = agent.update(states_np, actions, log_probs, rewards, dones, punish_indices)
+                    print(f"策略更新完成，损失: {loss:.4f}")
 
-                # 记录统计信息
-                training_stats['losses'].append(total_loss)
-                training_stats['entropies'].append(entropy)
-                print(
-                    f"Step {step_count}: Loss={total_loss:.4f} (Policy={policy_loss:.4f}, Value={value_loss:.4f}), Entropy={entropy:.4f}")
+                # 保存模型
+                torch.save({
+                    'policy_state_dict': agent.policy.state_dict(),
+                    'value_net_state_dict': agent.value_net.state_dict(),
+                    'optimizer_state_dict': agent.optimizer.state_dict(),
+                    'train_info': {
+                        'episode': episode,
+                        'last_reward': episode_reward,
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                }, MODEL_PATH)
+                print(f"模型已保存至 {MODEL_PATH}")
 
-            # 定期清理缓冲区
-            if len(replay_buffer['states']) > 1000:  # 限制缓冲区大小
-                for key in replay_buffer:
-                    replay_buffer[key] = replay_buffer[key][-500:]
-
-        # 回合结束处理
-        training_stats['episode_rewards'].append(episode_reward)
-        training_stats['episode_lengths'].append(step_count)
-        print(f"第 {episode} 轮结束，步数 {step + 1}，奖励: {episode_reward:.2f}")
-
-        if done:  # 检测到游戏结束
-            #print(f"第 {episode} 轮结束，步数 {step + 1}，奖励: {episode_reward:.2f}")
-            # 奖励调整逻辑
-            total_steps = len(rewards)
-            start_idx = max(0, total_steps - 5)
-            punish_indices = list(range(start_idx, total_steps))
-            with env.n_key_lock:
-                reward_indices = env.n_reward_indices.copy()
-                env.n_reward_indices = []
-            for idx in reward_indices:
-                if 0 <= idx < len(rewards):
-                    rewards[idx] += 0.2
-            for idx in punish_indices:
-                if 0 <= idx < len(rewards):
-                    rewards[idx] -= 2.0 if actions[idx] is not None else 1.0
-
-            # 模型更新
-            if len(states) > 0:
-                states_np = np.stack(states, axis=0)
-                loss = agent.update(states_np, actions, log_probs, rewards, dones, punish_indices)
-                print(f"策略更新完成，损失: {loss:.4f}")
-
-            okcheck = True
-
-
-
-                # # 保存模型
-                # torch.save({
-                #     'policy_state_dict': agent.policy.state_dict(),
-                #     'value_net_state_dict': agent.value_net.state_dict(),
-                #     'optimizer_state_dict': agent.optimizer.state_dict(),
-                #     'train_info': {
-                #         'episode': episode,
-                #         'last_reward': episode_reward,
-                #         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                #     }
-                # }, MODEL_PATH)
-                # print(f"模型已保存至 {MODEL_PATH}")
-
-        if episode % save_interval == 0 or done:
-            torch.save({
-                'policy_state_dict': agent.policy.state_dict(),
-                'value_net_state_dict': agent.value_net.state_dict(),
-                'optimizer_state_dict': agent.optimizer.state_dict(),
-                'training_stats': training_stats,
-                'epsilon': agent.epsilon,
-                'train_info': {
-                    'episode': episode,
-                    'last_reward': episode_reward,
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-            }, MODEL_PATH)
-            print(f"模型已保存")
-
-        if okcheck:
-            # 等待下一轮启动信号
-            print(f"等待第 {episode + 1} 轮启动信号...")
-            while True:
-                with env.game_over_lock:
-                    game_over = env.game_over
-                start_next = env.start_next_episode
-                if game_over and start_next:
-                    break
-                time.sleep(0.5)
-            okcheck = False
-            state = env.reset()  # 重置环境并开始下一轮
-
+                # 等待下一轮启动信号
+                print(f"等待第 {episode + 1} 轮启动信号...")
+                while True:
+                    with env.game_over_lock:
+                        game_over = env.game_over
+                    start_next = env.start_next_episode
+                    if game_over and start_next:
+                        break
+                    time.sleep(0.5)
+                state = env.reset()  # 重置环境并开始下一轮
+                break
 
     env.close()
 
